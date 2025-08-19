@@ -1,6 +1,8 @@
-﻿using System.Text.Json;
+﻿using Microsoft.Data.Sqlite;
+using OpenQA.Selenium.Chrome;
+using System.Text.Json;
 using System.Text.Json.Serialization;
-using Microsoft.Data.Sqlite;
+using System.Text.RegularExpressions;
 
 namespace WplaceScanner;
 
@@ -120,12 +122,15 @@ public static class WplaceScanner
         }
     }
 
+
     private static async Task VerboseScan(SqliteConnection dbConnection)
     {
-        using var httpClient = new HttpClient();
-        httpClient.DefaultRequestHeaders.Add("User-Agent", "Apidog/1.0.0 (https://apidog.com)");
-        httpClient.DefaultRequestHeaders.Add("Accept", "application/json");
-        httpClient.DefaultRequestHeaders.Add("Connection", "keep-alive");
+        var chromeOptions = new ChromeOptions();
+        chromeOptions.AddArgument("--headless=new"); // headless
+        chromeOptions.AddArgument("--disable-gpu");
+        chromeOptions.AddArgument("--no-sandbox");
+
+        using var driver = new ChromeDriver(chromeOptions);
 
         int fromTlx = int.Parse(FromTlx!);
         int fromTly = int.Parse(FromTly!);
@@ -153,15 +158,18 @@ public static class WplaceScanner
                     for (var y = 0; y < 1000; y += 10)
                     {
                         var pixelUrl = $"{url}?x={x}&y={y}";
-                        var response = await httpClient.GetAsync(pixelUrl);
 
-                        if (!response.IsSuccessStatusCode)
-                        {
-                            Console.WriteLine($"Error: {response.StatusCode}");
-                            continue;
-                        }
+                        // Navegar con Selenium
+                        driver.Navigate().GoToUrl(pixelUrl);
 
-                        string json = await response.Content.ReadAsStringAsync();
+                        driver.Manage().Timeouts().ImplicitWait = TimeSpan.FromSeconds(2);
+
+                        // Obtener el JSON que devuelve el endpoint
+                        var json = driver.PageSource;
+
+                        // ⚠ Selenium devuelve el HTML entero (<html>...</html>).
+                        // Como el endpoint devuelve JSON, hay que limpiar el <pre> u otro wrapper.
+                        json = ExtractJsonFromHtml(json);
 
                         using var doc = JsonDocument.Parse(json);
                         string prettyJson =
@@ -232,10 +240,27 @@ public static class WplaceScanner
                             }
                         }
 
-                        Thread.Sleep(500); // Sleep to avoid overwhelming the server
+                        Thread.Sleep(500); // evitar bloquear al server
                     }
                 }
             }
         }
     }
+
+    public static string ExtractJsonFromHtml(string html)
+    {
+        if (string.IsNullOrWhiteSpace(html))
+            return string.Empty;
+
+        // Buscar lo que esté dentro de <pre>...</pre>
+        var match = Regex.Match(html, @"<pre.*?>(.*?)<\/pre>", RegexOptions.Singleline);
+
+        if (match.Success)
+        {
+            return match.Groups[1].Value.Trim();
+        }
+
+        return string.Empty;
+    }
+
 }
