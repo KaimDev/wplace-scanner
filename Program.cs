@@ -37,7 +37,7 @@ public static class Program
 {
     public static async Task Main(string[] args)
     {
-        var dbPath = "C:\\Users\\johan\\Documents\\code\\scripts\\wplace.db";
+        var dbPath = "path-to-the-db";
         var connectionString = $"Data Source={dbPath}";
         using var dbConnection = new SqliteConnection(connectionString);
         dbConnection.Open();
