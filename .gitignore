@@ -1,0 +1,9 @@
+# .net ignore files
+
+bin/
+obj/
+*.user
+*.suo
+*.sln.docstates
+.idea
+*.db
