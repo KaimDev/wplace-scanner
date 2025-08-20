@@ -195,7 +195,7 @@ public static class WplaceScanner
                         {
                             PxY -= 10; // Decrement PxY to retry the same pixel
                             Console.WriteLine($"Invalid JSON for pixel ({PxX}, {PxY}) at ({tlx}, {tly}). Retrying...");
-                            Thread.Sleep(2000);
+                            Thread.Sleep(10000);
                             continue;
                         }
                         
