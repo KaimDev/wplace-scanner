@@ -1,8 +1,9 @@
 ﻿using Microsoft.Data.Sqlite;
-using OpenQA.Selenium.Chrome;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using System.Xml;
+using OpenQA.Selenium.Edge;
 
 namespace WplaceScanner;
 
@@ -74,6 +75,8 @@ public static class WplaceScanner
     private static string? FromTly { get; set; }
     private static string? ToTlx { get; set; }
     private static string? ToTly { get; set; }
+    private static int PxX { get; set; } = 0;
+    private static int PxY { get; set; } = 0;
 
     public static async Task Init(SqliteConnection dbConnection)
     {
@@ -97,6 +100,20 @@ public static class WplaceScanner
         Console.WriteLine($"TO: ({ToTlx}, {ToTly})");
         Console.WriteLine("Is this correct? (y/n)");
         var confirmation = Console.ReadLine();
+
+        Console.WriteLine("Initial Pixel X (Px X):");
+        var pxXInput = Console.ReadLine();
+        if (int.TryParse(pxXInput, out var pxX))
+            PxX = pxX;
+        else
+            PxX = 0;
+
+        Console.WriteLine("Initial Pixel Y (Px Y):");
+        var pxYInput = Console.ReadLine();
+        if (int.TryParse(pxYInput, out var pxY))
+            PxY = pxY;
+        else
+            PxY = 0;
 
         if (confirmation?.ToLower() == "n")
             goto RangeScanning;
@@ -125,12 +142,12 @@ public static class WplaceScanner
 
     private static async Task VerboseScan(SqliteConnection dbConnection)
     {
-        var chromeOptions = new ChromeOptions();
-        chromeOptions.AddArgument("--headless=new"); // headless
-        chromeOptions.AddArgument("--disable-gpu");
-        chromeOptions.AddArgument("--no-sandbox");
+        var chromeOptions = new EdgeOptions();
+        // chromeOptions.AddArgument("--headless=new"); // headless
+        // chromeOptions.AddArgument("--disable-gpu");
+        // chromeOptions.AddArgument("--no-sandbox");
 
-        using var driver = new ChromeDriver(chromeOptions);
+        using var driver = new EdgeDriver(chromeOptions);
 
         int fromTlx = int.Parse(FromTlx!);
         int fromTly = int.Parse(FromTly!);
@@ -142,6 +159,7 @@ public static class WplaceScanner
         int startTly = Math.Min(fromTly, toTly);
         int endTly = Math.Max(fromTly, toTly);
 
+        var random = new Random();
         for (int tlx = startTlx; tlx <= endTlx; tlx++)
         {
             for (int tly = startTly; tly <= endTly; tly++)
@@ -153,16 +171,17 @@ public static class WplaceScanner
                 }
 
                 var url = $"https://backend.wplace.live/s0/pixel/{tlx}/{tly}";
-                for (var x = 0; x < 1000; x += 10)
+                for (; PxX < 1000; PxX += 10)
                 {
-                    for (var y = 0; y < 1000; y += 10)
+                    for (; PxY < 1000; PxY += 10)
                     {
-                        var pixelUrl = $"{url}?x={x}&y={y}";
+                        var pixelUrl = $"{url}?x={PxX}&y={PxY}";
 
                         // Navegar con Selenium
-                        driver.Navigate().GoToUrl(pixelUrl);
+                        await driver.Navigate().GoToUrlAsync(pixelUrl);
 
-                        driver.Manage().Timeouts().ImplicitWait = TimeSpan.FromSeconds(2);
+                        Thread.Sleep(random.Next(500, 800));
+                        // driver.Manage().Timeouts().ImplicitWait = TimeSpan.FromSeconds(5);
 
                         // Obtener el JSON que devuelve el endpoint
                         var json = driver.PageSource;
@@ -171,13 +190,22 @@ public static class WplaceScanner
                         // Como el endpoint devuelve JSON, hay que limpiar el <pre> u otro wrapper.
                         json = ExtractJsonFromHtml(json);
 
+                        // is a valid json
+                        if (string.IsNullOrEmpty(json) || !json.StartsWith("{") || !json.EndsWith("}"))
+                        {
+                            PxY -= 10; // Decrement PxY to retry the same pixel
+                            Console.WriteLine($"Invalid JSON for pixel ({PxX}, {PxY}) at ({tlx}, {tly}). Retrying...");
+                            Thread.Sleep(2000);
+                            continue;
+                        }
+                        
                         using var doc = JsonDocument.Parse(json);
                         string prettyJson =
                             JsonSerializer.Serialize(doc.RootElement,
                                 new JsonSerializerOptions { WriteIndented = true });
 
                         Console.WriteLine($"From {FromTlx}, {FromTly} to {ToTlx}, {ToTly}:");
-                        Console.WriteLine($"TLX: {tlx}, TLY: {tly}, Pxx: {x}, Pyy: {y}");
+                        Console.WriteLine($"TLX: {tlx}, TLY: {tly}, Pxx: {PxX}, Pyy: {PxY}");
                         Console.WriteLine(prettyJson);
 
                         var info = JsonSerializer.Deserialize<PixelInfo>(prettyJson);
@@ -188,7 +216,8 @@ public static class WplaceScanner
                         if (info.PaintedBy.Name != string.Empty)
                         {
                             await using var cmd = dbConnection.CreateCommand();
-                            cmd.CommandText = "INSERT OR IGNORE INTO user(name) VALUES (@name)";
+                            cmd.CommandText = "INSERT OR IGNORE INTO user(id, name) VALUES (@id, @name)";
+                            cmd.Parameters.AddWithValue("@id", info.PaintedBy.Id);
                             cmd.Parameters.AddWithValue("@name", info.PaintedBy.Name);
                             await cmd.ExecuteNonQueryAsync();
                         }
@@ -207,42 +236,68 @@ public static class WplaceScanner
                         {
                             await using var cmd = dbConnection.CreateCommand();
                             cmd.CommandText =
-                                "INSERT OR IGNORE INTO user_alliance(user_name, alliance_id) VALUES (@user_name, @alliance_id)";
-                            cmd.Parameters.AddWithValue("@user_name", info.PaintedBy.Name);
+                                "INSERT OR IGNORE INTO user_alliance(user_id, alliance_id) VALUES (@user_id, @alliance_id)";
+                            cmd.Parameters.AddWithValue("@user_id", info!.PaintedBy!.Id);
                             cmd.Parameters.AddWithValue("@alliance_id", info.PaintedBy.AllianceId);
                             await cmd.ExecuteNonQueryAsync();
                         }
 
-                        await using (var cmd = dbConnection.CreateCommand())
+                        await using (var checkCmd = dbConnection.CreateCommand())
                         {
-                            cmd.CommandText =
-                                "INSERT OR IGNORE INTO region(id, name, number, country_id, tl_x, tl_y) VALUES (@id, @name, @number, @country_id, @tl_x, @tl_y)";
-                            cmd.Parameters.AddWithValue("@id", info.Region.Id);
-                            cmd.Parameters.AddWithValue("@name", info.Region.Name);
-                            cmd.Parameters.AddWithValue("@number", info.Region.Number);
-                            cmd.Parameters.AddWithValue("@country_id", info.Region.CountryId);
-                            cmd.Parameters.AddWithValue("@tl_x", FromTlx);
-                            cmd.Parameters.AddWithValue("@tl_y", FromTly);
-                            await cmd.ExecuteNonQueryAsync();
+                            checkCmd.CommandText = "SELECT COUNT(*) FROM region WHERE tl_x = @tl_x AND tl_y = @tl_y";
+                            checkCmd.Parameters.AddWithValue("@tl_x", tlx);
+                            checkCmd.Parameters.AddWithValue("@tl_y", tly);
+
+                            var count = (long)await checkCmd.ExecuteScalarAsync();
+                            if (count == 0)
+                            {
+                                await using (var cmd = dbConnection.CreateCommand())
+                                {
+                                    cmd.CommandText =
+                                        "INSERT INTO region(region_id, name, number, country_id, tl_x, tl_y) VALUES (@region_id, @name, @number, @country_id, @tl_x, @tl_y)";
+                                    cmd.Parameters.AddWithValue("@region_id", info.Region.Id);
+                                    cmd.Parameters.AddWithValue("@name", info.Region.Name);
+                                    cmd.Parameters.AddWithValue("@number", info.Region.Number);
+                                    cmd.Parameters.AddWithValue("@country_id", info.Region.CountryId);
+                                    cmd.Parameters.AddWithValue("@tl_x", tlx);
+                                    cmd.Parameters.AddWithValue("@tl_y", tly);
+                                    await cmd.ExecuteNonQueryAsync();
+                                }
+                            }
                         }
 
                         if (info.PaintedBy.Name != string.Empty)
                         {
+                            await using var regionIdCm = dbConnection.CreateCommand();
+                            regionIdCm.CommandText = "SELECT id FROM region WHERE tl_x = @tl_x AND tl_y = @tl_y";
+                            regionIdCm.Parameters.AddWithValue("@tl_x", tlx);
+                            regionIdCm.Parameters.AddWithValue("@tl_y", tly);
+                            var regionId = (long?)await regionIdCm.ExecuteScalarAsync();
+
+                            if (regionId == null)
+                            {
+                                Console.WriteLine($"Region not found for TLX: {tlx}, TLY: {tly}");
+                                break;
+                            }
+
                             await using (var cmd = dbConnection.CreateCommand())
                             {
                                 cmd.CommandText =
-                                    "INSERT OR IGNORE INTO pixel(px_x, px_y, region_id, user_name) VALUES (@px_x, @px_y, @region_id, @user_name)";
-                                cmd.Parameters.AddWithValue("@px_x", x);
-                                cmd.Parameters.AddWithValue("@px_y", y);
-                                cmd.Parameters.AddWithValue("@region_id", info.Region.Id);
-                                cmd.Parameters.AddWithValue("@user_name", info.PaintedBy.Name);
+                                    "INSERT OR IGNORE INTO pixel(px_x, px_y, region_id, user_id) " +
+                                    "VALUES (@px_x, @px_y, @region_id, @user_id);";
+                                cmd.Parameters.AddWithValue("@px_x", PxX);
+                                cmd.Parameters.AddWithValue("@px_y", PxY);
+                                cmd.Parameters.AddWithValue("@region_id", regionId);
+                                cmd.Parameters.AddWithValue("@user_id", info.PaintedBy.Id);
                                 await cmd.ExecuteNonQueryAsync();
                             }
                         }
-
-                        Thread.Sleep(500); // evitar bloquear al server
                     }
+
+                    PxY = 0; // Reset PxY for the next PxX iteration
                 }
+
+                PxX = 0; // Reset PxX for the next TLX iteration
             }
         }
     }
@@ -262,5 +317,4 @@ public static class WplaceScanner
 
         return string.Empty;
     }
-
 }
